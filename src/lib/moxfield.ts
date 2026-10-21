@@ -155,8 +155,29 @@ export class MoxfieldLoadError extends Error {
   }
 }
 
-export async function loadMoxfieldDeck(publicId: string, id: string, signal?: AbortSignal): Promise<Deck> {
-  const res = await fetch(`/api/moxfield?id=${encodeURIComponent(publicId)}`, { signal });
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
+ * Loads a deck through the Netlify function. The function enforces Moxfield's
+ * global one-call-per-second limit and answers 429 + Retry-After when the
+ * queue is long; we wait and retry a few times before giving up.
+ * `onWait` lets the UI show that the request is queued.
+ */
+export async function loadMoxfieldDeck(
+  publicId: string,
+  id: string,
+  signal?: AbortSignal,
+  onWait?: (seconds: number) => void,
+): Promise<Deck> {
+  let res: Response;
+  for (let attempt = 0; ; attempt++) {
+    res = await fetch(`/api/moxfield?id=${encodeURIComponent(publicId)}`, { signal });
+    if (res.status !== 429 || attempt >= 6) break;
+    const retryAfter = Number(res.headers.get('retry-after')) || 2;
+    const waitSeconds = Math.min(Math.max(retryAfter, 1), 30);
+    onWait?.(waitSeconds);
+    await sleep(waitSeconds * 1000);
+  }
   if (!res.ok) {
     let detail = '';
     try {

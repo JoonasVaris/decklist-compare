@@ -90,12 +90,13 @@ export default function DeckInputs({ rows, disabled, onChange, onSubmit }: Props
               {!validUrl && <div className="hint error">That doesn’t look like a Moxfield deck URL.</div>}
               {row.status === 'error' && <div className="hint error">{row.error}</div>}
               {row.status === 'ok' && row.loadedName && <div className="hint ok">Loaded: {row.loadedName}</div>}
+              {row.status === 'loading' && row.loadedName && <div className="hint">{row.loadedName}</div>}
             </div>
           </div>
         );
       })}
       <div className="input-actions">
-        <button type="button" className="secondary" onClick={add} disabled={disabled || rows.length >= 8}>
+        <button type="button" className="secondary" onClick={add} disabled={disabled}>
           + Add deck
         </button>
         <button type="submit" className="primary" disabled={disabled || readyCount < 2}>

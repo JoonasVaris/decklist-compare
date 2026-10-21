@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import DeckInputs, { newRow, type DeckInputRow } from './components/DeckInputs';
 import Results from './components/Results';
+import TrafficNotice from './components/TrafficNotice';
 import { compareDecks } from './lib/compare';
 import { loadMoxfieldDeck, parseMoxfieldId, parseTextDecklist } from './lib/moxfield';
 import { cacheKeyFor, fetchCardImages, type Identifier } from './lib/scryfall';
+import { fetchTrafficStatus, type TrafficStatus } from './lib/status';
 import type { CardImage, ComparedCard, Deck } from './lib/types';
 
 function rowsFromUrl(): DeckInputRow[] {
@@ -29,6 +31,21 @@ export default function App() {
   const [imageProgress, setImageProgress] = useState<{ done: number; total: number } | null>(null);
   const [imageError, setImageError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const [traffic, setTraffic] = useState<TrafficStatus | null>(null);
+
+  // Poll the rate-limit schedule: once on load, then every 2.5 s while decks are loading,
+  // so users see when they are queued behind other people's requests.
+  useEffect(() => {
+    const ac = new AbortController();
+    const tick = () => void fetchTrafficStatus(ac.signal).then((s) => s && setTraffic(s));
+    tick();
+    if (!loading) return () => ac.abort();
+    const timer = setInterval(tick, 2500);
+    return () => {
+      clearInterval(timer);
+      ac.abort();
+    };
+  }, [loading]);
 
   const result = useMemo(() => (decks && decks.length >= 2 ? compareDecks(decks) : null), [decks]);
 
@@ -66,38 +83,40 @@ export default function App() {
     const next = rows.map((r) => ({ ...r, status: active.includes(r) ? ('loading' as const) : ('idle' as const), error: undefined }));
     setRows(next);
 
-    await Promise.all(
-      active.map(async (row, i) => {
-        const deckId = `d${i}`;
-        try {
-          let deck: Deck;
-          if (row.showText && row.text.trim()) {
-            const publicId = parseMoxfieldId(row.url);
-            deck = parseTextDecklist(row.text, deckId, row.url.trim() ? `Pasted deck ${i + 1}` : `Pasted deck ${i + 1}`);
-            if (publicId) {
-              deck.url = `https://www.moxfield.com/decks/${publicId}`;
-              deck.publicId = publicId;
-            }
-          } else {
-            const publicId = parseMoxfieldId(row.url);
-            if (!publicId) throw new Error('Not a valid Moxfield deck URL.');
-            deck = await loadMoxfieldDeck(publicId, deckId);
+    // Decks are loaded one after another: the server allows one Moxfield call per
+    // second globally, so parallel requests would only queue up behind each other.
+    for (const [i, row] of active.entries()) {
+      const deckId = `d${i}`;
+      try {
+        let deck: Deck;
+        if (row.showText && row.text.trim()) {
+          const publicId = parseMoxfieldId(row.url);
+          deck = parseTextDecklist(row.text, deckId, `Pasted deck ${i + 1}`);
+          if (publicId) {
+            deck.url = `https://www.moxfield.com/decks/${publicId}`;
+            deck.publicId = publicId;
           }
-          if (deck.cards.length === 0) throw new Error('No cards found in this deck.');
-          loaded[i] = deck;
-          setRows((rs) => rs.map((r) => (r.id === row.id ? { ...r, status: 'ok', loadedName: deck.name } : r)));
-        } catch (err) {
-          const message = (err as Error).message;
-          setRows((rs) =>
-            rs.map((r) =>
-              r.id === row.id
-                ? { ...r, status: 'error', error: message, showText: r.showText || /403|refused|non-JSON|reach/i.test(message) }
-                : r,
-            ),
+        } else {
+          const publicId = parseMoxfieldId(row.url);
+          if (!publicId) throw new Error('Not a valid Moxfield deck URL.');
+          deck = await loadMoxfieldDeck(publicId, deckId, undefined, (seconds) =>
+            setRows((rs) => rs.map((r) => (r.id === row.id ? { ...r, status: 'loading', loadedName: `Queued, retrying in ${seconds}s…` } : r))),
           );
         }
-      }),
-    );
+        if (deck.cards.length === 0) throw new Error('No cards found in this deck.');
+        loaded[i] = deck;
+        setRows((rs) => rs.map((r) => (r.id === row.id ? { ...r, status: 'ok', loadedName: deck.name } : r)));
+      } catch (err) {
+        const message = (err as Error).message;
+        setRows((rs) =>
+          rs.map((r) =>
+            r.id === row.id
+              ? { ...r, status: 'error', error: message, loadedName: undefined, showText: r.showText || /403|refused|non-JSON|reach/i.test(message) }
+              : r,
+          ),
+        );
+      }
+    }
 
     const ok = loaded.filter((d): d is Deck => d !== null);
     if (ok.length >= 2) {
@@ -131,7 +150,19 @@ export default function App() {
           Paste two or more <a href="https://www.moxfield.com">Moxfield</a> deck links to see which mainboard cards they share and which
           are unique.
         </p>
+        <ul className="limitations" aria-label="How this app works and its limitations">
+          <li>
+            <strong>One Moxfield request per second, for everyone.</strong> When
+            several people compare at once, requests queue up and loading is slower. A notice appears above when that happens.
+          </li>
+          <li>
+            <strong>Decks are cached for up to 12 hours.</strong> Edits made on Moxfield after a deck was first loaded here may not
+            show until the cache expires.
+          </li>
+        </ul>
       </header>
+
+      <TrafficNotice status={traffic} />
 
       <DeckInputs rows={rows} disabled={loading} onChange={setRows} onSubmit={() => void compare()} />
 

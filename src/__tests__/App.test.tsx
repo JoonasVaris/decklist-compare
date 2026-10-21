@@ -30,12 +30,18 @@ const moxDeck = (publicId: string, name: string, cards: Array<[string, number]>)
   },
 });
 
+let trafficStatus = { busyMs: 0, queuedCalls: 0, minGapMs: 1100 };
+
 describe('App end-to-end (mocked network)', () => {
   beforeEach(() => {
+    trafficStatus = { busyMs: 0, queuedCalls: 0, minGapMs: 1100 };
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
+        if (url.startsWith('/api/status')) {
+          return new Response(JSON.stringify(trafficStatus), { status: 200, headers: { 'Content-Type': 'application/json' } });
+        }
         if (url.startsWith('/api/moxfield')) {
           const id = new URL(url, 'http://x').searchParams.get('id');
           if (id === 'AAAAAAAAAAAAAAAAAAAAAA')
@@ -112,5 +118,21 @@ describe('App end-to-end (mocked network)', () => {
     await screen.findByText('Deck not found. Is it public?');
     expect(screen.getByText(/could not be loaded/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /In all/ })).toBeNull();
+  });
+
+  it('shows a traffic notice when the shared rate-limit queue is busy', async () => {
+    trafficStatus = { busyMs: 8049, queuedCalls: 8, minGapMs: 1100 };
+    render(<App />);
+    const notice = await screen.findByRole('status');
+    expect(notice).toHaveTextContent('Busy right now, loading will be slower.');
+  });
+
+  it('stays quiet when the queue is short', async () => {
+    trafficStatus = { busyMs: 900, queuedCalls: 1, minGapMs: 1100 };
+    render(<App />);
+    // Let the status fetch resolve.
+    await waitFor(() => expect(fetch).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.queryByRole('status')).toBeNull();
   });
 });
